@@ -26,7 +26,7 @@ A comprehensive desktop application for managing Magic: The Gathering card colle
 **Clone the repository**:
 - git clone
 - cd mtgmanager/mtg_manager
-- Create a folder called database as well as a folder called assets under mtg_manager and create the following sub-folders cache,card_images,set_icons,styles
+- Create a folder called database under mtg_manager as well as a folder called assets under mtg_manager and create the following sub-folders under assets folder: cache,card_images,set_icons,styles
 - Create a virtual environment(python -m venv venv(or .env or .venv or env)
 - Activate virtual environment(venv\scripts\activate(windows) if you called the virtual environment venv
 - pip install -r requirements.txt
