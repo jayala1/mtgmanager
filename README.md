@@ -23,7 +23,8 @@ A comprehensive desktop application for managing Magic: The Gathering card colle
 ### Installation
 **Clone the repository**:
 - git clone
-- cd mtgmanager
+- cd mtgmanager/mtg_manager
+- Create a folder called assets under mtg_manager and create the following sub-folders cache,card_images,set_icons,styles
 - pip install -r requirements.txt
 - python main.py
 
