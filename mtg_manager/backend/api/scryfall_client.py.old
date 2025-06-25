@@ -1,0 +1,413 @@
+# backend/api/scryfall_client.py
+"""
+Scryfall API client for fetching Magic: The Gathering card data.
+"""
+
+import requests
+import time
+import logging
+import json
+import os
+import gzip
+import threading
+from typing import Callable, Optional, Dict, List, Any
+from urllib.parse import quote
+
+class ScryfallClient:
+    """Client for interacting with the Scryfall API."""
+    
+    BASE_URL = "https://api.scryfall.com"
+    RATE_LIMIT_DELAY = 0.1  # 100ms delay between requests
+    USER_AGENT = "MTGCollectionManager/1.0"
+    
+    def __init__(self, cache_dir: str = "assets/cache"):
+        """Initialize the Scryfall client with caching support."""
+        self.cache_dir = cache_dir
+        self.logger = logging.getLogger(__name__)
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': self.USER_AGENT,
+            'Accept': 'application/json'
+        })
+        
+        # Create cache directory
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Load cached data
+        self._load_cache()
+        
+        # Track last request time for rate limiting
+        self._last_request_time = 0
+    
+    def _load_cache(self):
+        """Load cached card data from local files."""
+        self.card_cache = {}
+        cache_file = os.path.join(self.cache_dir, "cards_cache.json")
+        
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    self.card_cache = json.load(f)
+                self.logger.info(f"Loaded {len(self.card_cache)} cards from cache")
+            except Exception as e:
+                self.logger.error(f"Failed to load cache: {e}")
+                self.card_cache = {}
+    
+    def _save_cache(self):
+        """Save card cache to local file."""
+        cache_file = os.path.join(self.cache_dir, "cards_cache.json")
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.card_cache, f, indent=2, ensure_ascii=False)
+            self.logger.info(f"Saved {len(self.card_cache)} cards to cache")
+        except Exception as e:
+            self.logger.error(f"Failed to save cache: {e}")
+    
+    def _rate_limit(self):
+        """Enforce rate limiting between API requests."""
+        current_time = time.time()
+        time_since_last_request = current_time - self._last_request_time
+        
+        if time_since_last_request < self.RATE_LIMIT_DELAY:
+            sleep_time = self.RATE_LIMIT_DELAY - time_since_last_request
+            time.sleep(sleep_time)
+        
+        self._last_request_time = time.time()
+    
+    def _make_request(self, endpoint: str, params: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
+        """Make a request to the Scryfall API with rate limiting."""
+        self._rate_limit()
+        
+        url = f"{self.BASE_URL}{endpoint}"
+        
+        try:
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"API request failed: {e}")
+            return None
+    
+    def search_card_by_name(self, name: str, exact: bool = False) -> Optional[Dict[str, Any]]:
+        """Search for a card by name using fuzzy or exact matching."""
+        # Check cache first
+        cache_key = f"name:{name.lower()}"
+        if cache_key in self.card_cache:
+            return self.card_cache[cache_key]
+        
+        # Make API request
+        endpoint = "/cards/named"
+        params = {"exact" if exact else "fuzzy": name}
+        
+        result = self._make_request(endpoint, params)
+        
+        if result:
+            # Cache the result
+            self.card_cache[cache_key] = result
+            self._save_cache()
+        
+        return result
+    
+    def get_card_by_id(self, card_id: str) -> Optional[Dict[str, Any]]:
+        """Get card data by Scryfall ID."""
+        # Check cache first
+        cache_key = f"id:{card_id}"
+        if cache_key in self.card_cache:
+            return self.card_cache[cache_key]
+        
+        # Make API request
+        endpoint = f"/cards/{card_id}"
+        result = self._make_request(endpoint)
+        
+        if result:
+            # Cache the result
+            self.card_cache[cache_key] = result
+            self._save_cache()
+        
+        return result
+    
+    def search_cards(self, query: str, page: int = 1) -> Optional[Dict[str, Any]]:
+        """Search for cards using Scryfall's search syntax."""
+        endpoint = "/cards/search"
+        params = {
+            "q": query,
+            "page": page
+        }
+        
+        return self._make_request(endpoint, params)
+    
+    def get_sets(self) -> Optional[List[Dict[str, Any]]]:
+        """Get all Magic: The Gathering sets."""
+        # Check cache first
+        cache_key = "sets:all"
+        if cache_key in self.card_cache:
+            return self.card_cache[cache_key]
+        
+        endpoint = "/sets"
+        result = self._make_request(endpoint)
+        
+        if result and 'data' in result:
+            sets_data = result['data']
+            # Cache the result
+            self.card_cache[cache_key] = sets_data
+            self._save_cache()
+            return sets_data
+        
+        return None
+    
+    def download_bulk_data(self, bulk_type: str = "default_cards") -> Optional[str]:
+        """Download bulk card data and save to local file."""
+        # Get bulk data info
+        endpoint = "/bulk-data"
+        bulk_info = self._make_request(endpoint)
+        
+        if not bulk_info or 'data' not in bulk_info:
+            return None
+        
+        # Find the requested bulk data type
+        bulk_data_url = None
+        for bulk_item in bulk_info['data']:
+            if bulk_item.get('type') == bulk_type:
+                bulk_data_url = bulk_item.get('download_uri')
+                break
+        
+        if not bulk_data_url:
+            self.logger.error(f"Bulk data type '{bulk_type}' not found")
+            return None
+        
+        # Download bulk data
+        try:
+            self.logger.info(f"Downloading bulk data from {bulk_data_url}")
+            response = requests.get(bulk_data_url, stream=True)
+            response.raise_for_status()
+            
+            # Save to file
+            bulk_file = os.path.join(self.cache_dir, f"bulk_{bulk_type}.json")
+            with open(bulk_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            self.logger.info(f"Bulk data saved to {bulk_file}")
+            return bulk_file
+            
+        except Exception as e:
+            self.logger.error(f"Failed to download bulk data: {e}")
+            return None
+    
+    def download_bulk_data_with_progress(self, bulk_type: str = "default_cards", 
+                                       progress_callback: Optional[Callable[[int, int], None]] = None) -> Optional[str]:
+        """Download bulk card data with progress tracking."""
+        # Get bulk data info
+        endpoint = "/bulk-data"
+        bulk_info = self._make_request(endpoint)
+        
+        if not bulk_info or 'data' not in bulk_info:
+            self.logger.error("Failed to get bulk data information")
+            return None
+        
+        # Find the requested bulk data type
+        bulk_data_url = None
+        file_size = 0
+        
+        for bulk_item in bulk_info['data']:
+            if bulk_item.get('type') == bulk_type:
+                bulk_data_url = bulk_item.get('download_uri')
+                file_size = bulk_item.get('size', 0)
+                break
+        
+        if not bulk_data_url:
+            self.logger.error(f"Bulk data type '{bulk_type}' not found")
+            return None
+        
+        # Download bulk data with progress
+        try:
+            self.logger.info(f"Downloading bulk data from {bulk_data_url}")
+            
+            response = self.session.get(bulk_data_url, stream=True)
+            response.raise_for_status()
+            
+            # Save to file with progress tracking
+            bulk_file = os.path.join(self.cache_dir, f"bulk_{bulk_type}.json")
+            downloaded = 0
+            
+            with open(bulk_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # Call progress callback if provided
+                        if progress_callback and file_size > 0:
+                            progress_callback(downloaded, file_size)
+            
+            self.logger.info(f"Bulk data saved to {bulk_file}")
+            return bulk_file
+            
+        except Exception as e:
+            self.logger.error(f"Failed to download bulk data: {e}")
+            return None
+    
+    def parse_bulk_data_file(self, bulk_file: str, 
+                            progress_callback: Optional[Callable[[int, int], None]] = None) -> bool:
+        """Parse bulk data file and populate local cache."""
+        if not os.path.exists(bulk_file):
+            self.logger.error(f"Bulk file not found: {bulk_file}")
+            return False
+        
+        try:
+            self.logger.info(f"Parsing bulk data file: {bulk_file}")
+            
+            # Get file size for progress tracking
+            file_size = os.path.getsize(bulk_file)
+            processed = 0
+            
+            # Determine if file is gzipped
+            is_gzipped = bulk_file.endswith('.gz')
+            
+            # Open file (handle both regular and gzipped files)
+            if is_gzipped:
+                file_obj = gzip.open(bulk_file, 'rt', encoding='utf-8')
+            else:
+                file_obj = open(bulk_file, 'r', encoding='utf-8')
+            
+            with file_obj as f:
+                # Load JSON data
+                cards_data = json.load(f)
+                
+                if not isinstance(cards_data, list):
+                    self.logger.error("Invalid bulk data format")
+                    return False
+                
+                # Process cards and update cache
+                total_cards = len(cards_data)
+                self.logger.info(f"Processing {total_cards} cards...")
+                
+                for i, card_data in enumerate(cards_data):
+                    # Cache card by name
+                    if 'name' in card_data:
+                        cache_key = f"name:{card_data['name'].lower()}"
+                        self.card_cache[cache_key] = card_data
+                    
+                    # Cache card by ID
+                    if 'id' in card_data:
+                        cache_key = f"id:{card_data['id']}"
+                        self.card_cache[cache_key] = card_data
+                    
+                    # Cache card by oracle_id for exact matching
+                    if 'oracle_id' in card_data:
+                        cache_key = f"oracle:{card_data['oracle_id']}"
+                        self.card_cache[cache_key] = card_data
+                    
+                    # Cache by set and collector number for specific prints
+                    if 'set' in card_data and 'collector_number' in card_data:
+                        cache_key = f"print:{card_data['set']}:{card_data['collector_number']}"
+                        self.card_cache[cache_key] = card_data
+                    
+                    # Update progress every 1000 cards to avoid too many UI updates
+                    if progress_callback and i % 1000 == 0:
+                        progress_callback(i, total_cards)
+                
+                # Final progress update
+                if progress_callback:
+                    progress_callback(total_cards, total_cards)
+                
+                # Save updated cache
+                self._save_cache()
+                
+                self.logger.info(f"Successfully processed {total_cards} cards")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Failed to parse bulk data: {e}")
+            return False
+    
+    def get_bulk_data_info(self) -> Optional[Dict[str, Any]]:
+        """Get information about available bulk data downloads."""
+        endpoint = "/bulk-data"
+        return self._make_request(endpoint)
+    
+    def search_card_in_cache(self, name: str) -> Optional[Dict[str, Any]]:
+        """Search for a card in the local cache only."""
+        cache_key = f"name:{name.lower()}"
+        return self.card_cache.get(cache_key)
+    
+    def get_cached_card_by_id(self, card_id: str) -> Optional[Dict[str, Any]]:
+        """Get a card from cache by ID."""
+        cache_key = f"id:{card_id}"
+        return self.card_cache.get(cache_key)
+    
+    def get_cached_card_by_oracle_id(self, oracle_id: str) -> Optional[Dict[str, Any]]:
+        """Get a card from cache by oracle ID."""
+        cache_key = f"oracle:{oracle_id}"
+        return self.card_cache.get(cache_key)
+    
+    def get_cached_card_by_print(self, set_code: str, collector_number: str) -> Optional[Dict[str, Any]]:
+        """Get a specific card print from cache."""
+        cache_key = f"print:{set_code}:{collector_number}"
+        return self.card_cache.get(cache_key)
+    
+    def search_cards_in_cache(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Search for cards in the local cache using simple text matching."""
+        results = []
+        query_lower = query.lower()
+        
+        # Search through cached cards
+        for cache_key, card_data in self.card_cache.items():
+            if not cache_key.startswith('name:'):
+                continue
+                
+            # Skip if we already have enough results
+            if len(results) >= limit:
+                break
+            
+            # Check if query matches card name
+            card_name = card_data.get('name', '').lower()
+            if query_lower in card_name:
+                results.append(card_data)
+        
+        # Sort results by relevance (exact matches first, then partial matches)
+        def sort_key(card):
+            name = card.get('name', '').lower()
+            if name == query_lower:
+                return 0  # Exact match
+            elif name.startswith(query_lower):
+                return 1  # Starts with query
+            else:
+                return 2  # Contains query
+        
+        results.sort(key=sort_key)
+        return results
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get statistics about the current cache."""
+        total_entries = len(self.card_cache)
+        
+        # Count different types of cache entries
+        name_entries = sum(1 for key in self.card_cache.keys() if key.startswith('name:'))
+        id_entries = sum(1 for key in self.card_cache.keys() if key.startswith('id:'))
+        oracle_entries = sum(1 for key in self.card_cache.keys() if key.startswith('oracle:'))
+        print_entries = sum(1 for key in self.card_cache.keys() if key.startswith('print:'))
+        other_entries = total_entries - name_entries - id_entries - oracle_entries - print_entries
+        
+        return {
+            'total_entries': total_entries,
+            'name_entries': name_entries,
+            'id_entries': id_entries,
+            'oracle_entries': oracle_entries,
+            'print_entries': print_entries,
+            'other_entries': other_entries,
+            'cache_file_path': os.path.join(self.cache_dir, "cards_cache.json")
+        }
+    
+    def clear_cache(self) -> bool:
+        """Clear the local cache."""
+        try:
+            self.card_cache = {}
+            cache_file = os.path.join(self.cache_dir, "cards_cache.json")
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+            self.logger.info("Cache cleared successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to clear cache: {e}")
+            return False
