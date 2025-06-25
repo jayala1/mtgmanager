@@ -2,7 +2,7 @@
 
 ![image](https://github.com/user-attachments/assets/89b63b43-1040-4ea4-af79-4aa9d0780bb8)
 
-A comprehensive desktop application for managing Magic: The Gathering card collections and deck building.
+A comprehensive desktop application for managing Magic: The Gathering card collections and deck building. Please note there might be a few things not working or 100% there. No gurantees use at your own risk. Proof of concept for me and trying to build something for myself.
 
 - **Collection Management**: Organize cards in multiple named collections(only one collection at this time)
 - **Deck Building**: Create and manage decks with commander and sideboard support
