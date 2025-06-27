@@ -16,6 +16,7 @@ A comprehensive desktop application for managing Magic: The Gathering card colle
 - Python 3.8 or higher
 - Windows 10/11 (primary support)
 - Internet connection for initial card database download
+- Ollama with a vision model(granite 8b vision seems to work the best)
 
 🙏 Acknowledgments
 - Scryfall for providing the comprehensive Magic: The Gathering API
